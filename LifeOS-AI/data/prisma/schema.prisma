@@ -1,0 +1,252 @@
+// =============================================================================
+// LifeOS AI — Prisma Schema (Task Management Domain, Phase 1)
+// Datasource: PostgreSQL. Generated client consumed by the NestJS API.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum TaskStatus {
+  PLANNED
+  IN_PROGRESS
+  COMPLETED
+  MISSED
+  CANCELLED
+}
+
+enum TaskCategory {
+  WORK
+  HEALTH
+  PERSONAL
+  ERRANDS
+  LEARNING
+  SOCIAL
+  FINANCE
+  OTHER
+}
+
+// Eisenhower quadrant derived from urgency + importance.
+enum EisenhowerQuadrant {
+  URGENT_IMPORTANT // Do first
+  IMPORTANT_NOT_URGENT // Schedule
+  URGENT_NOT_IMPORTANT // Delegate
+  NEITHER // Eliminate
+}
+
+enum TaskSize {
+  SMALL
+  MEDIUM
+  LARGE
+  CRITICAL
+}
+
+enum ReminderChannel {
+  IN_APP
+  EMAIL
+  PUSH
+}
+
+enum ReminderStatus {
+  SCHEDULED
+  SENT
+  CANCELLED
+}
+
+enum MotivationEventType {
+  TASK_COMPLETED
+  TASK_MISSED
+  DAILY_BONUS
+  STREAK_BONUS
+  ACHIEVEMENT
+}
+
+// ----------------------------------------------------------------------------
+// Identity
+// ----------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  tasks            Task[]
+  plans            DailyPlan[]
+  motivation       MotivationState?
+  motivationEvents MotivationEvent[]
+  achievements     Achievement[]
+  preferences      UserPreference?
+
+  @@map("users")
+}
+
+model UserPreference {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @unique @map("user_id") @db.Uuid
+  workdayStart    String   @default("09:00") @map("workday_start") // HH:mm local
+  workdayEnd      String   @default("18:00") @map("workday_end")
+  timezone        String   @default("UTC")
+  reminderLeadMin Int      @default(15) @map("reminder_lead_min")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+// ----------------------------------------------------------------------------
+// Task aggregate
+// ----------------------------------------------------------------------------
+
+model Task {
+  id                String             @id @default(uuid()) @db.Uuid
+  userId            String             @map("user_id") @db.Uuid
+  planId            String?            @map("plan_id") @db.Uuid
+  title             String
+  description       String?
+  category          TaskCategory       @default(OTHER)
+  status            TaskStatus         @default(PLANNED)
+  size              TaskSize           @default(MEDIUM)
+  // Eisenhower inputs (0-100 scale) + derived quadrant.
+  urgency           Int                @default(50)
+  importance        Int                @default(50)
+  quadrant          EisenhowerQuadrant @default(NEITHER)
+  estimatedMinutes  Int                @map("estimated_minutes")
+  suggestedStart    DateTime?          @map("suggested_start")
+  suggestedEnd      DateTime?          @map("suggested_end")
+  deadline          DateTime?
+  completedAt       DateTime?          @map("completed_at")
+  // AI provenance.
+  aiConfidence      Float?             @map("ai_confidence")
+  aiRecommendation  String?            @map("ai_recommendation")
+  source            String             @default("manual") // manual | ai_planner
+  xpValue           Int                @default(0) @map("xp_value")
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan         DailyPlan?       @relation(fields: [planId], references: [id], onDelete: SetNull)
+  reminders    Reminder[]
+  // Self-referential task dependencies (this task depends on `dependsOn`).
+  dependencies TaskDependency[] @relation("DependentTask")
+  dependents   TaskDependency[] @relation("PrerequisiteTask")
+
+  @@index([userId, status])
+  @@index([userId, suggestedStart])
+  @@map("tasks")
+}
+
+model TaskDependency {
+  id             String @id @default(uuid()) @db.Uuid
+  dependentId    String @map("dependent_id") @db.Uuid // the task that waits
+  prerequisiteId String @map("prerequisite_id") @db.Uuid // must finish first
+
+  dependent    Task @relation("DependentTask", fields: [dependentId], references: [id], onDelete: Cascade)
+  prerequisite Task @relation("PrerequisiteTask", fields: [prerequisiteId], references: [id], onDelete: Cascade)
+
+  @@unique([dependentId, prerequisiteId])
+  @@map("task_dependencies")
+}
+
+// ----------------------------------------------------------------------------
+// Planning
+// ----------------------------------------------------------------------------
+
+model DailyPlan {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  planDate      DateTime @map("plan_date") @db.Date
+  rawInput      String   @map("raw_input")
+  summary       String?
+  hasConflicts  Boolean  @default(false) @map("has_conflicts")
+  conflictNotes String?  @map("conflict_notes")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks Task[]
+
+  @@index([userId, planDate])
+  @@map("daily_plans")
+}
+
+// ----------------------------------------------------------------------------
+// Reminders / notifications
+// ----------------------------------------------------------------------------
+
+model Reminder {
+  id        String          @id @default(uuid()) @db.Uuid
+  taskId    String          @map("task_id") @db.Uuid
+  remindAt  DateTime        @map("remind_at")
+  channel   ReminderChannel @default(IN_APP)
+  status    ReminderStatus  @default(SCHEDULED)
+  message   String
+  sentAt    DateTime?       @map("sent_at")
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([status, remindAt])
+  @@map("reminders")
+}
+
+// ----------------------------------------------------------------------------
+// Motivation / gamification
+// ----------------------------------------------------------------------------
+
+model MotivationState {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @map("user_id") @db.Uuid
+  totalXp        Int      @default(0) @map("total_xp")
+  level          Int      @default(1)
+  motivationScore Int     @default(70) @map("motivation_score") // 0-100
+  currentStreak  Int      @default(0) @map("current_streak")
+  longestStreak  Int      @default(0) @map("longest_streak")
+  lastActiveDate DateTime? @map("last_active_date") @db.Date
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("motivation_states")
+}
+
+model MotivationEvent {
+  id        String              @id @default(uuid()) @db.Uuid
+  userId    String              @map("user_id") @db.Uuid
+  type      MotivationEventType
+  xpDelta   Int                 @default(0) @map("xp_delta")
+  scoreDelta Int                @default(0) @map("score_delta")
+  reason    String
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("motivation_events")
+}
+
+model Achievement {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @map("user_id") @db.Uuid
+  code        String
+  title       String
+  description String
+  unlockedAt  DateTime @default(now()) @map("unlocked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, code])
+  @@map("achievements")
+}
